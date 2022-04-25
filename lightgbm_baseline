@@ -1,0 +1,79 @@
+```
+import pandas as pd
+import numpy as np
+import lightgbm as lgb
+import time
+from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import roc_auc_score as auc
+from sklearn.model_selection import StratifiedKFold
+
+path = 'WTB_HB_toUserA/toUserA/'
+LABEL = 'LABEL'
+
+raw_df_train = pd.read_csv(path+'train.csv')
+raw_df_test = pd.read_csv(path+'testa_nolabel.csv')
+
+
+df_all = pd.concat([raw_df_train, raw_df_test])
+
+
+for feat in df_all.columns[:-1]:
+    if df_all[feat].dtype == object:
+        df_all[feat] = df_all[feat].astype('str')
+        print(feat)
+        le = LabelEncoder()
+        df_all[feat] = le.fit_transform(df_all[feat])
+        
+
+df_train = df_all[df_all[LABEL].notna()]
+df_test = df_all[df_all[LABEL].isna()]
+
+
+feats = [f for f in df_train.columns if f not in [LABEL, ]]
+
+params = {
+
+    'learning_rate': 0.05,
+    'boosting_type': 'gbdt',
+    'objective': 'binary',
+    'metric': 'auc',
+    'verbose': -1,
+    'seed': 2222,
+    'n_jobs': 4,
+}
+
+fold_num = 5
+seeds = [2222]
+oof = np.zeros(len(df_train))
+importance = 0
+pred_y = pd.DataFrame()
+for seed in seeds:
+    kf = StratifiedKFold(n_splits=fold_num, shuffle=True, random_state=seed)
+    for fold, (train_idx, val_idx) in enumerate(kf.split(df_train[feats], df_train[LABEL])):
+        print('-----------', fold)
+        train = lgb.Dataset(df_train.loc[train_idx, feats],
+                            df_train.loc[train_idx, LABEL])
+        val = lgb.Dataset(df_train.loc[val_idx, feats],
+                          df_train.loc[val_idx, LABEL])
+        model = lgb.train(params, train, valid_sets=val, num_boost_round=10000,
+                          callbacks=[lgb.early_stopping(stopping_rounds=100), lgb.log_evaluation(period=200)])
+        
+        oof[val_idx] += model.predict(df_train.loc[val_idx, feats]) / len(seeds)
+        pred_y['fold_%d_seed_%d' % (fold, seed)] = model.predict(df_test[feats])
+        importance += model.feature_importance(importance_type='gain') / fold_num
+print('AUC... ',auc(df_train[LABEL], oof))
+
+
+feats_importance = pd.DataFrame()
+feats_importance['name'] = feats
+feats_importance['importance'] = importance
+print(feats_importance.sort_values('importance', ascending=False)[:30])
+        
+        
+df_test[LABEL] = pred_y.mean(axis=1)
+tmp = df_test.sort_values(by=LABEL, ascending=False)
+
+submit = tmp[:255]
+
+submit[['USER_ID']].to_csv('../output/base_cat_5fold_AUC_3.csv', index=False)
+```
