@@ -1,0 +1,91 @@
+import pandas as pd
+import numpy as np
+from tqdm import tqdm
+import warnings
+import gc
+warnings.filterwarnings('ignore')
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.model_selection import StratifiedKFold
+from sklearn.metrics import roc_auc_score,precision_score
+from catboost import CatBoostRegressor, Pool,CatBoostClassifier
+
+
+train='../output/WTB_HB_A/toUserA/train.csv'
+test='../output/WTB_HB_A/toUserA/testa_nolabel.csv'
+
+
+train=pd.read_csv(train)
+test=pd.read_csv(test)
+
+
+data=pd.concat([train,test],axis=0).reset_index(drop=True)
+
+
+
+cat_col1='CITY_ID COUNTY_NAME FIRST_CALL_AREA_CODE MAIN_NO_FLAG IS_HJH'.split()
+
+cat_col2=[
+       'IS_RESTART',
+       'IS_OLD_ZK', 'PHONE_TYPE', 'IS_KD_USER', 'IS_WHITE_USER',
+       'IS_YZDH_USER'
+         ] 
+cat_col3=[
+    'IS_SILENCE_USER', 'IS_REVIVE_USER',
+       'IS_ZP_GW_CHNL', 'IS_SR_GW_CHNL', 'IS_ZP_GW_CREAT', 'IS_SR_GW_CREAT',
+       'IS_PROVIN_GW_LACCI', 'IS_OAO', 'IS_PROVIN_ONLINE', 'IS_BLACK_IMEI',
+     'IS_BLACK_CERT','IS_MYXZ','ADD_MYXZ_SCENE_NAME','RM_MYXZ_SCENE_NAME',
+    'IS_YJCZ','USER_CRDT_LVL'
+]
+
+
+#IMEI_SCENE_NAME是文本特征，待优化处理
+#ADD_MYXZ_TIME是时间特征
+#RM_MYXZ_TIME 是时间特征
+cat_col=cat_col1+cat_col2+cat_col3
+del_col='IMEI_SCENE_NAME ADD_MYXZ_TIME RM_MYXZ_TIME'.split()
+
+for i in cat_col:
+    data[i]=data[i].astype('str')
+    
+    
+data.drop(columns=del_col,inplace=True)
+
+
+
+train=data[pd.isna(data.LABEL)==False]
+test=data[pd.isna(data.LABEL)==True]
+
+y=train.pop('LABEL')
+test.drop(columns=['LABEL'],inplace=True)
+
+
+
+NFOLD = 5
+random_state = 2021
+KF = StratifiedKFold(n_splits=NFOLD, shuffle=True, random_state=random_state)
+oof_lgb = np.zeros(len(train))
+predictions_lgb = np.zeros(len(test))
+
+
+
+# 五折交叉验证
+for fold_, (trn_idx, val_idx) in enumerate(KF.split(train,y)):
+    print('----------------------- fold {} -----------------------'.format(str(fold_+1)))
+
+    trn_data = Pool(train.iloc[trn_idx], y.iloc[trn_idx],cat_features=cat_col)
+    val_data = Pool(train.iloc[val_idx], y.iloc[val_idx],cat_features=cat_col)
+    
+    clf_lgb=CatBoostClassifier(iterations=10000,learning_rate=0.05,random_state=2021, early_stopping_rounds=200,eval_metric='AUC',
+    use_best_model=True,max_ctr_complexity=8)  
+    clf_lgb.fit(trn_data,eval_set=val_data,verbose=200)
+    oof_lgb[val_idx] = clf_lgb.predict(train.iloc[val_idx],prediction_type='Probability')[:,1]
+    predictions_lgb[:] += (clf_lgb.predict(test,prediction_type='Probability')[:,1] / NFOLD)
+    
+
+train.loc[:, 'pre_pro'] = oof_lgb
+test.loc[:, 'pre_pro'] = predictions_lgb
+
+
+sub_path='../output/base_cat_5fold_AUC.csv'
+sub=test[['USER_ID','pre_pro']].sort_values(by=['pre_pro'],ascending=False).head(255)
+sub['USER_ID'].to_csv(sub_path,header=True,index=False)
